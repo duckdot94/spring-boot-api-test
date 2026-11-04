@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>메인 페이지</title>
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+</head>
+<body>
+<header class="header">
+    <h1>Spring Boot + jQuery</h1>
+    <nav>
+        <a href="#" class="nav-link active" data-target="home">홈</a>
+        <a href="#" class="nav-link" data-target="about">소개</a>
+        <a href="#" class="nav-link" data-target="api">API 테스트</a>
+        <a href="#" class="nav-link" data-target="ext">외부 API 확인</a>
+        <a href="#" class="nav-link" data-target="chat">채팅</a>
+    </nav>
+</header>
+
+<main class="container">
+    <section id="home" class="panel">
+        <h2>환영합니다 👋</h2>
+        <p>Spring Boot와 jQuery로 만든 간단한 메인 페이지입니다.</p>
+    </section>
+
+    <section id="about" class="panel" hidden>
+        <h2>소개</h2>
+        <p>Thymeleaf가 페이지를 렌더링하고, jQuery가 화면 전환과 AJAX 호출을 담당합니다.</p>
+    </section>
+
+    <section id="api" class="panel" hidden>
+        <h2>API 테스트</h2>
+        <form id="helloForm">
+            <input type="text" id="nameInput" placeholder="이름을 입력하세요">
+            <button type="submit">호출</button>
+        </form>
+        <pre id="result">결과가 여기에 표시됩니다.</pre>
+    </section>
+
+    <section id="ext" class="panel" hidden>
+        <h2>외부 API 확인 <span id="extStatus" class="badge">확인 중…</span></h2>
+        <p>대상: <code id="extBase"></code></p>
+        <div class="row">
+            <button type="button" id="healthBtn">헬스체크 (/api/health)</button>
+        </div>
+        <form id="extForm">
+            <select id="extMethod"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+            <input type="text" id="extPath" value="/api/health" placeholder="/경로">
+            <button type="submit">요청</button>
+        </form>
+        <textarea id="extBody" rows="4" placeholder="요청 본문 (JSON, 선택)"></textarea>
+        <pre id="extResult">결과가 여기에 표시됩니다.</pre>
+    </section>
+
+    <section id="chat" class="panel" hidden>
+        <h2>채팅 <span id="chatModel" class="badge"></span>
+            <button type="button" id="chatReset" class="small">새 대화</button></h2>
+        <div id="chatLog" class="chat-log"></div>
+        <form id="chatForm">
+            <input type="text" id="chatInput" placeholder="질문을 입력하세요" autocomplete="off">
+            <button type="submit" id="chatSend">전송</button>
+        </form>
+    </section>
+</main>
+
+<footer class="footer">&copy; 2026 springBootApiTst</footer>
+
+<script th:src="@{/webjars/jquery/3.7.1/jquery.min.js}"></script>
+<script th:src="@{/js/main.js}"></script>
+</body>
+</html>
