@@ -87,9 +87,61 @@ $(function () {
     });
 
     // ===== 채팅 =====
-    // /api/ask/stream 은 답변을 NDJSON 으로 한 줄씩 보낸다.
-    //   {"delta":"조각"} … {"done":true,"model":"..."}  (오류: {"error":"..."})
-    // 이전 대화는 API 의 history 필드({question, answer} 배열)로 전달한다.
+    // POST /chat/stream 은 SSE(text/event-stream)로 응답한다.
+    //   event: delta  data: {"text":"조각"}      (여러 번)
+    //   event: done   data: {"model":"..."}
+    //   event: error  data: {"message":"..."}
+    //   ": keepalive" 주석은 연결 유지용이라 무시한다.
+    // EventSource 는 GET 만 지원하므로 fetch 로 읽고 SSE 를 직접 파싱한다.
+    // 이전 대화는 history([{question, answer}]) 로 전달한다.
+    function streamSse(url, payload, onEvent) {
+        return fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+            body: JSON.stringify(payload)
+        }).then(function (res) {
+            if (!res.ok) {
+                onEvent({ event: 'error', data: JSON.stringify({ message: '요청에 실패했습니다. (HTTP ' + res.status + ')' }) });
+                return;
+            }
+            var reader = res.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = '';
+
+            function dispatch(block) {
+                var name = 'message', data = [];
+                block.split('\n').forEach(function (line) {
+                    if (!line || line.charAt(0) === ':') return;           // 빈 줄, 주석(keepalive)
+                    var i = line.indexOf(':');
+                    var field = i < 0 ? line : line.slice(0, i);
+                    var value = i < 0 ? '' : line.slice(i + 1).replace(/^ /, '');
+                    if (field === 'event') name = value;
+                    else if (field === 'data') data.push(value);
+                });
+                if (data.length) onEvent({ event: name, data: data.join('\n') });
+            }
+
+            function pump() {
+                return reader.read().then(function (r) {
+                    if (r.done) {
+                        buffer += decoder.decode();
+                        if (buffer.trim()) dispatch(buffer.replace(/\r\n/g, '\n'));
+                        return;
+                    }
+                    buffer += decoder.decode(r.value, { stream: true });
+                    buffer = buffer.replace(/\r\n/g, '\n');
+                    var end;
+                    while ((end = buffer.indexOf('\n\n')) >= 0) {   // 빈 줄이 이벤트의 끝
+                        dispatch(buffer.slice(0, end));
+                        buffer = buffer.slice(end + 2);
+                    }
+                    return pump();
+                });
+            }
+            return pump();
+        });
+    }
+
     var MAX_HISTORY = 10;            // API 로 보낼 최근 질문/답변 쌍 수 (API 최대 20)
     var STORE_KEY = 'chatHistoryV2';
     var history = [];                // [{question, answer}]
@@ -132,50 +184,36 @@ $(function () {
         $('#chatSend').prop('disabled', true);
 
         var answer = '', model = '', errMsg = null, done = false;
-        var parsedUpTo = 0;   // 이미 처리한 위치. 줄바꿈으로 끝난 완성된 줄만 파싱한다.
 
-        function consume(text) {
-            var end = text.lastIndexOf('\n');
-            if (end < parsedUpTo) return;
-            text.slice(parsedUpTo, end).split('\n').forEach(function (line) {
-                if (!line.trim()) return;
-                var o = parseJson(line);
-                if (o.delta) answer += o.delta;
-                if (o.error) errMsg = o.error;
-                if (o.done) { done = true; model = o.model || model; }
-            });
-            parsedUpTo = end + 1;
-            if (answer) {
+        streamSse('/chat/stream', { question: q, history: history.slice(-MAX_HISTORY) }, function (ev) {
+            var d = parseJson(ev.data);
+            if (ev.event === 'delta') {
+                answer += d.text || '';
                 $bot.attr('class', 'msg bot').text(answer); // 도착한 만큼 바로 표시
                 scrollChat();
+            } else if (ev.event === 'done') {
+                done = true;
+                model = d.model || model;
+            } else if (ev.event === 'error') {
+                errMsg = d.message || '오류가 발생했습니다.';
             }
-        }
-
-        var body = { question: q, history: history.slice(-MAX_HISTORY) };
-        extFetch('POST', '/api/ask/stream', JSON.stringify(body), consume)
-            .then(function (r) {
-                if (r.status !== 200) { // 스트림 시작 전 오류 (JSON)
-                    $bot.attr('class', 'msg err').text(parseJson(r.text).error || ('오류 (HTTP ' + r.status + ')'));
-                    return;
-                }
-                consume(r.text.slice(-1) === '\n' ? r.text : r.text + '\n');
-                if (model) $('#chatModel').text(model);
-                if (done && !errMsg) {
-                    // 성공한 턴만 기록에 남긴다
-                    history.push({ question: q, answer: answer });
-                    saveHistory();
-                    return;
-                }
-                var msg = errMsg || '응답이 중간에 끊겼습니다.';
-                if (answer) addMsg('err', msg); else $bot.attr('class', 'msg err').text(msg);
-            })
-            .catch(function () {
-                $bot.attr('class', 'msg err').text('프록시 호출에 실패했습니다.');
-            })
-            .finally(function () {
-                $('#chatSend').prop('disabled', false);
-                $('#chatInput').focus();
-            });
+        }).then(function () {
+            if (model) $('#chatModel').text(model);
+            if (done && !errMsg) {
+                // 성공한 턴만 기록에 남긴다
+                history.push({ question: q, answer: answer });
+                saveHistory();
+                return;
+            }
+            var msg = errMsg || '응답이 중간에 끊겼습니다.';
+            if (answer) addMsg('err', msg); else $bot.attr('class', 'msg err').text(msg);
+        }).catch(function () {
+            var msg = '서버에 연결하지 못했습니다.';
+            if (answer) addMsg('err', msg); else $bot.attr('class', 'msg err').text(msg);
+        }).finally(function () {
+            $('#chatSend').prop('disabled', false);
+            $('#chatInput').focus();
+        });
     });
 
     $('.nav-link[data-target="chat"]').on('click', function () { $('#chatInput').focus(); });

@@ -10,7 +10,7 @@ Spring Boot + Thymeleaf + jQuery로 만든 메인 페이지입니다.
 | 홈 / 소개 | 기본 화면 |
 | API 테스트 | 이 앱의 `/api/hello`를 jQuery AJAX로 호출하는 데모 |
 | 외부 API 확인 | 외부 API의 헬스체크(`/api/health`) 상태 배지와, 메서드·경로·JSON 본문을 직접 넣어 보는 요청 도구. 응답은 도착하는 대로 표시 |
-| 채팅 | 질문을 보내면 답변이 조각 단위로 말풍선에 이어서 표시. 이전 대화를 기억하고, "새 대화" 버튼으로 초기화 |
+| 채팅 | 질문을 보내면 답변이 SSE로 조각 단위로 말풍선에 이어서 표시. 이전 대화를 기억하고, "새 대화" 버튼으로 초기화 |
 
 ## 요구 사항
 
@@ -45,7 +45,8 @@ src/main
 │   ├── SpringBootApiTstApplication.java
 │   └── controller
 │       ├── MainController.java          # 메인 페이지, /api/hello
-│       └── ExternalApiController.java   # 외부 API 스트리밍 프록시
+│       ├── ChatController.java          # 채팅: WebClient + SSE (POST /chat/stream)
+│       └── ExternalApiController.java   # 외부 API 확인용 범용 프록시 (RestTemplate)
 └── resources
     ├── templates/main.html              # Thymeleaf 템플릿
     ├── static/js/main.js                # 탭 전환, 외부 API 확인, 채팅
@@ -55,25 +56,37 @@ src/main
 
 ## 동작 방식
 
-브라우저는 외부 API를 직접 호출하지 않고, 이 앱의 프록시(`POST /proxy/stream`)를 거칩니다. CORS 문제를 피하고 허용 범위를 서버에서 제한하기 위해서입니다.
+브라우저는 외부 API를 직접 호출하지 않고 이 앱을 거칩니다. CORS 문제를 피하고, 호출 범위를 서버에서 제한하기 위해서입니다.
+`spring-boot-starter-web`(Tomcat/MVC)에 `spring-boot-starter-webflux`를 함께 넣어 `WebClient`만 추가로 사용하며, 서버는 계속 서블릿 스택으로 동작합니다.
+
+### 채팅 (`POST /chat/stream`)
 
 ```
-브라우저 ──fetch──▶ Spring /proxy/stream ──RestTemplate──▶ 외부 API (127.0.0.1:8787)
-        ◀─ 청크 ──                        ◀─ 청크 ──
+브라우저 ──fetch(POST)──▶ ChatController ──WebClient──▶ 외부 API /api/ask/stream
+        ◀── SSE ───────            ◀── NDJSON ──────
 ```
 
-- `ExternalApiController`가 `RestTemplate.execute`로 외부 API를 호출하고, 응답을 버퍼링하지 않고 읽는 즉시 flush해서 브라우저로 전달합니다.
-- 외부 API의 상태 코드와 `Content-Type`을 그대로 전달합니다. 4xx/5xx도 예외로 바꾸지 않습니다.
-- 외부 API에 연결하지 못하면 `502`와 `{"error": "..."}`를 돌려줍니다.
-- 연결 타임아웃은 3초, 응답 읽기 타임아웃은 180초입니다. LLM 응답이 느려도 기다릴 수 있고, API가 꺼져 있으면 빠르게 실패합니다.
-- 브라우저는 `fetch`와 `ReadableStream`으로 청크를 읽어 화면을 갱신합니다.
+요청: `{"question": "...", "history": [{"question": "...", "answer": "..."}]}`
 
-### 프록시 API
+| 이벤트 | data | 설명 |
+|---|---|---|
+| `delta` | `{"text":"조각"}` | 답변 조각 (여러 번) |
+| `done` | `{"model":"gemma3:12b"}` | 정상 종료 |
+| `error` | `{"message":"..."}` | 오류. 스트림이 시작되면 HTTP 상태는 200이라 이벤트로 전달 |
+| (주석) | `: keepalive` | 15초마다 전송. 첫 토큰이 늦을 때 중간 장비가 연결을 끊지 않게 함 |
 
-`POST /proxy/stream`
+- 외부 호출 경로는 서버에 고정되어 있고, 질문 길이(10,000자)와 대화 기록(20쌍)을 서버에서 제한합니다.
+- 내부 오류 내용은 고객에게 보여주지 않고 일반 문구만 전달하며, 상세는 로그로 남깁니다.
+- 연결 타임아웃 3초, 청크 사이 무응답 180초, 전체 5분입니다.
+- 브라우저가 연결을 끊으면 외부 호출도 취소되어 LLM 생성이 멈춥니다. 토큰이 흐르는 중에는 즉시, 응답 대기 중에는 최대 약 30초 걸릴 수 있습니다.
+- 브라우저는 `EventSource`가 GET만 지원해서, `fetch`로 읽고 SSE를 직접 파싱합니다.
+
+### 외부 API 확인 (`POST /proxy/stream`)
+
+확인용 개발 도구입니다. `RestTemplate.execute`로 호출하고 응답을 버퍼링하지 않고 받는 즉시 flush해서 전달하며, 외부 API의 상태 코드와 `Content-Type`을 그대로 돌려줍니다. 연결 실패는 `502`입니다.
 
 ```json
-{ "method": "POST", "path": "/api/ask/stream", "body": "{\"question\":\"안녕\"}" }
+{ "method": "GET", "path": "/api/health" }
 ```
 
 | 필드 | 설명 |
@@ -82,6 +95,7 @@ src/main
 | `path` | `/`로 시작하는 상대 경로. `//`로 시작하거나 `://`가 들어간 값은 `400` |
 | `body` | 요청 본문 문자열 (선택, JSON으로 전송) |
 
+호출 경로를 브라우저가 정할 수 있는 범용 프록시이므로, 고객에게 공개하는 환경에서는 제거하거나 인증을 붙여야 합니다.
 `GET /proxy/info`는 현재 설정된 외부 API 주소를 반환합니다.
 
 ## 외부 API
@@ -107,4 +121,4 @@ src/main
 
 ### 대화 기록
 
-채팅은 API의 `history` 필드(`[{question, answer}]`)로 이전 대화를 전달합니다. 최근 10쌍까지 보내며(API 최대 20쌍), 기록은 브라우저 `sessionStorage`에 저장되어 새로고침해도 유지되고 탭을 닫으면 사라집니다. 오류가 난 턴은 기록에 남기지 않습니다.
+채팅은 `history` 필드(`[{question, answer}]`)로 이전 대화를 전달합니다. 최근 10쌍까지 보내며(서버 최대 20쌍), 기록은 브라우저 `sessionStorage`에 저장되어 새로고침해도 유지되고 탭을 닫으면 사라집니다. 오류가 난 턴은 기록에 남기지 않습니다.
